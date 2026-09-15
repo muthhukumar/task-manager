@@ -1,0 +1,15 @@
+services:
+  task-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: personal-task-manager
+    ports:
+      - "8420:80"
+    volumes:
+      - task_data:/data
+    restart: unless-stopped
+
+volumes:
+  task_data:
+    name: personal_task_manager_data
