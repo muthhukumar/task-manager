@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -126,13 +127,13 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var input models.TaskInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
-	task, err := models.UpdateTask(h.DB, id, input)
+	task, err := models.UpdateTaskJSON(h.DB, id, bodyBytes)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			writeError(w, http.StatusNotFound, "task not found")

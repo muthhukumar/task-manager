@@ -6,6 +6,8 @@ import {
   updateTask,
   deleteTask,
   addComment,
+  updateComment,
+  deleteComment,
   uploadAttachment,
   deleteAttachment,
   createTask,
@@ -18,6 +20,7 @@ export const AllTasks: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<number>>(new Set());
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<TaskStatus | ''>('');
@@ -31,9 +34,9 @@ export const AllTasks: React.FC = () => {
   const [subtaskParentId, setSubtaskParentId] = useState<number | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
 
-  const fetchTasks = useCallback(async () => {
+  const fetchTasks = useCallback(async (initialLoad = false) => {
     try {
-      setLoading(true);
+      if (initialLoad) setLoading(true);
       const filter: TaskFilter = {
         top_level_only: true,
         include_done: includeDone,
@@ -57,41 +60,170 @@ export const AllTasks: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    fetchTasks();
+    fetchTasks(true);
 
-    const handleUpdate = () => fetchTasks();
+    const handleUpdate = () => fetchTasks(false);
     window.addEventListener('task-updated', handleUpdate);
     return () => window.removeEventListener('task-updated', handleUpdate);
   }, [fetchTasks]);
 
+  const toggleTaskExpand = (taskId: number, force?: boolean) => {
+    setExpandedTaskIds((prev) => {
+      const next = new Set(prev);
+      const shouldExpand = force !== undefined ? force : !next.has(taskId);
+      if (shouldExpand) {
+        next.add(taskId);
+      } else {
+        next.delete(taskId);
+      }
+      return next;
+    });
+  };
+
+  // Helper: update a specific task in local state (handles both top-level and subtask nesting)
+  const updateTaskLocally = useCallback((taskId: number, updater: (t: Task) => Task) => {
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id === taskId) return updater(t);
+        if (t.subtasks && t.subtasks.some((st) => st.id === taskId)) {
+          return {
+            ...t,
+            subtasks: t.subtasks.map((st) => (st.id === taskId ? updater(st) : st)),
+          };
+        }
+        return t;
+      })
+    );
+  }, []);
+
   const handleUpdateStatus = async (taskId: number, newStatus: TaskStatus) => {
+    updateTaskLocally(taskId, (t) => ({ ...t, status: newStatus }));
     await updateTask(taskId, { status: newStatus });
-    await fetchTasks();
+    fetchTasks(false);
   };
 
   const handleUpdateTask = async (taskId: number, input: Partial<TaskInput>) => {
     await updateTask(taskId, input);
-    await fetchTasks();
+    await fetchTasks(false);
   };
 
   const handleDeleteTask = async (taskId: number) => {
     await deleteTask(taskId);
-    await fetchTasks();
+    setExpandedTaskIds((prev) => {
+      const next = new Set(prev);
+      next.delete(taskId);
+      return next;
+    });
+    setTasks((prev) =>
+      prev
+        .filter((t) => t.id !== taskId)
+        .map((t) => {
+          if (!t.subtasks) return t;
+          const filtered = t.subtasks.filter((st) => st.id !== taskId);
+          if (filtered.length !== t.subtasks.length) {
+            return { ...t, subtasks: filtered };
+          }
+          return t;
+        })
+    );
   };
 
   const handleAddComment = async (taskId: number, body: string) => {
-    await addComment(taskId, body);
-    await fetchTasks();
+    const newComment = await addComment(taskId, body);
+    updateTaskLocally(taskId, (t) => ({
+      ...t,
+      comments: [...(t.comments || []), newComment],
+    }));
+    setExpandedTaskIds((prev) => new Set(prev).add(taskId));
+  };
+
+  const handleUpdateComment = async (commentId: number, body: string) => {
+    const updated = await updateComment(commentId, body);
+    setTasks((prev) =>
+      prev.map((t) => {
+        let updatedHere = false;
+        const updatedComments = t.comments?.map((c) => {
+          if (c.id === commentId) {
+            updatedHere = true;
+            return updated;
+          }
+          return c;
+        });
+        const updatedSubtasks = t.subtasks?.map((st) => {
+          let subUpdated = false;
+          const subComments = st.comments?.map((c) => {
+            if (c.id === commentId) {
+              subUpdated = true;
+              return updated;
+            }
+            return c;
+          });
+          return subUpdated ? { ...st, comments: subComments } : st;
+        });
+
+        let res = t;
+        if (updatedHere) res = { ...res, comments: updatedComments };
+        if (updatedSubtasks && updatedSubtasks !== t.subtasks) res = { ...res, subtasks: updatedSubtasks };
+        return res;
+      })
+    );
+  };
+
+  const handleDeleteComment = async (commentId: number) => {
+    await deleteComment(commentId);
+    setTasks((prev) =>
+      prev.map((t) => {
+        const filtered = t.comments?.filter((c) => c.id !== commentId);
+        const subtasksFiltered = t.subtasks?.map((st) => {
+          const sf = st.comments?.filter((c) => c.id !== commentId);
+          if (sf && sf.length !== (st.comments?.length ?? 0)) {
+            return { ...st, comments: sf };
+          }
+          return st;
+        });
+
+        let res = t;
+        if (filtered && filtered.length !== (t.comments?.length ?? 0)) {
+          res = { ...res, comments: filtered };
+        }
+        if (subtasksFiltered && subtasksFiltered !== t.subtasks) {
+          res = { ...res, subtasks: subtasksFiltered };
+        }
+        return res;
+      })
+    );
   };
 
   const handleUploadAttachment = async (taskId: number, file: File) => {
-    await uploadAttachment(taskId, file);
-    await fetchTasks();
+    const newAttachment = await uploadAttachment(taskId, file);
+    updateTaskLocally(taskId, (t) => ({
+      ...t,
+      attachments: [...(t.attachments || []), newAttachment],
+    }));
+    setExpandedTaskIds((prev) => new Set(prev).add(taskId));
   };
 
   const handleDeleteAttachment = async (attachmentId: number) => {
     await deleteAttachment(attachmentId);
-    await fetchTasks();
+    setTasks((prev) =>
+      prev.map((t) => {
+        const filtered = t.attachments?.filter((a) => a.id !== attachmentId);
+        if (filtered && filtered.length !== (t.attachments?.length ?? 0)) {
+          return { ...t, attachments: filtered };
+        }
+        if (t.subtasks) {
+          const updatedSubs = t.subtasks.map((st) => {
+            const stFiltered = st.attachments?.filter((a) => a.id !== attachmentId);
+            if (stFiltered && stFiltered.length !== (st.attachments?.length ?? 0)) {
+              return { ...st, attachments: stFiltered };
+            }
+            return st;
+          });
+          return { ...t, subtasks: updatedSubs };
+        }
+        return t;
+      })
+    );
   };
 
   const handleFormSubmit = async (input: TaskInput) => {
@@ -100,7 +232,7 @@ export const AllTasks: React.FC = () => {
     } else {
       await createTask(input);
     }
-    await fetchTasks();
+    await fetchTasks(false);
   };
 
   const resetFilters = () => {
@@ -238,7 +370,7 @@ export const AllTasks: React.FC = () => {
       </div>
 
       {/* Tasks List */}
-      {loading ? (
+      {loading && tasks.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--muted-foreground)', fontSize: '0.875rem' }}>
           Loading tasks...
         </div>
@@ -263,10 +395,16 @@ export const AllTasks: React.FC = () => {
             <TaskCard
               key={task.id}
               task={task}
+              isExpanded={expandedTaskIds.has(task.id)}
+              onToggleExpand={(force) => toggleTaskExpand(task.id, force)}
+              isTaskExpanded={(id) => expandedTaskIds.has(id)}
+              onToggleExpandTask={toggleTaskExpand}
               onUpdateStatus={handleUpdateStatus}
               onUpdateTask={handleUpdateTask}
               onDeleteTask={handleDeleteTask}
               onAddComment={handleAddComment}
+              onUpdateComment={handleUpdateComment}
+              onDeleteComment={handleDeleteComment}
               onUploadAttachment={handleUploadAttachment}
               onDeleteAttachment={handleDeleteAttachment}
               onEditTask={(t) => {

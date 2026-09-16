@@ -24,11 +24,18 @@ interface Props {
   onUpdateTask: (taskId: number, input: Partial<TaskInput>) => Promise<void>;
   onDeleteTask: (taskId: number) => Promise<void>;
   onAddComment: (taskId: number, body: string) => Promise<void>;
+  onUpdateComment?: (commentId: number, body: string) => Promise<void>;
+  onDeleteComment?: (commentId: number) => Promise<void>;
   onUploadAttachment: (taskId: number, file: File) => Promise<void>;
   onDeleteAttachment: (attachmentId: number) => Promise<void>;
   onEditTask: (task: Task) => void;
   onAddSubtask: (parentTaskId: number) => void;
   isSubtaskView?: boolean;
+  isExpanded?: boolean;
+  onToggleExpand?: (force?: boolean) => void;
+  isTaskExpanded?: (taskId: number) => boolean;
+  onToggleExpandTask?: (taskId: number, force?: boolean) => void;
+  extraActions?: React.ReactNode;
 }
 
 export const TaskCard: React.FC<Props> = ({
@@ -37,13 +44,34 @@ export const TaskCard: React.FC<Props> = ({
   onUpdateTask,
   onDeleteTask,
   onAddComment,
+  onUpdateComment,
+  onDeleteComment,
   onUploadAttachment,
   onDeleteAttachment,
   onEditTask,
   onAddSubtask,
   isSubtaskView = false,
+  isExpanded: controlledExpanded,
+  onToggleExpand,
+  isTaskExpanded,
+  onToggleExpandTask,
+  extraActions,
 }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [internalExpanded, setInternalExpanded] = useState(false);
+  const isExpanded = controlledExpanded !== undefined
+    ? controlledExpanded
+    : (isTaskExpanded ? isTaskExpanded(task.id) : internalExpanded);
+
+  const handleToggleExpand = (force?: boolean) => {
+    if (onToggleExpandTask) {
+      onToggleExpandTask(task.id, force);
+    } else if (onToggleExpand) {
+      onToggleExpand(force);
+    } else {
+      setInternalExpanded((prev) => (force !== undefined ? force : !prev));
+    }
+  };
+
   const [showMenu, setShowMenu] = useState(false);
   const [isPromptingBlocker, setIsPromptingBlocker] = useState(false);
   const [blockerReason, setBlockerReason] = useState('');
@@ -75,7 +103,10 @@ export const TaskCard: React.FC<Props> = ({
       await onAddComment(task.id, `Blocker: ${blockerReason.trim()}`);
       setBlockerReason('');
       setIsPromptingBlocker(false);
-      setIsExpanded(true);
+      handleToggleExpand(true);
+      if (task.parent_task_id && onToggleExpandTask) {
+        onToggleExpandTask(task.parent_task_id, true);
+      }
     } catch (err: any) {
       alert(err.message || 'Failed to mark as blocked');
     }
@@ -93,6 +124,17 @@ export const TaskCard: React.FC<Props> = ({
   const completedSubtasks = task.subtasks?.filter((st) => st.status === 'done').length || 0;
   const totalSubtasks = task.subtasks?.length || 0;
 
+  const blockerComment = task.comments
+    ?.slice()
+    .reverse()
+    .find((c) => c.body.toLowerCase().startsWith('blocker:'))?.body;
+
+  const blockerReasonText = blockerComment
+    ? blockerComment.replace(/^blocker:\s*/i, '').trim()
+    : (task.status === 'blocked' && task.comments && task.comments.length > 0
+        ? task.comments[task.comments.length - 1].body
+        : null);
+
   return (
     <div
       className="card"
@@ -103,28 +145,37 @@ export const TaskCard: React.FC<Props> = ({
       }}
     >
       {/* Header & Status row */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.625rem', flex: 1, minWidth: 0 }}>
-          {!isSubtaskView && (
-            <button
-              type="button"
-              className="btn-ghost btn-icon-sm"
-              onClick={() => setIsExpanded(!isExpanded)}
-              style={{ marginTop: '0.125rem', borderRadius: '4px', cursor: 'pointer' }}
-            >
-              {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn-ghost btn-icon-sm"
+            onClick={() => handleToggleExpand()}
+            style={{
+              marginTop: '0.125rem',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              width: isSubtaskView ? '1.5rem' : undefined,
+              height: isSubtaskView ? '1.5rem' : undefined,
+              padding: isSubtaskView ? '2px' : undefined,
+            }}
+            title={isExpanded ? 'Collapse details' : 'Expand details'}
+            aria-label={isExpanded ? 'Collapse details' : 'Expand details'}
+          >
+            {isExpanded ? <ChevronDown size={isSubtaskView ? 14 : 16} /> : <ChevronRight size={isSubtaskView ? 14 : 16} />}
+          </button>
 
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.375rem' }}>
               <span
+                onClick={() => handleToggleExpand()}
                 style={{
                   fontSize: isSubtaskView ? '0.875rem' : '0.9375rem',
                   fontWeight: 600,
                   color: task.status === 'done' ? 'var(--muted-foreground)' : 'var(--foreground)',
                   textDecoration: task.status === 'done' ? 'line-through' : 'none',
                   letterSpacing: '-0.01em',
+                  cursor: 'pointer',
                 }}
               >
                 {task.title}
@@ -199,8 +250,9 @@ export const TaskCard: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* Status segment toggle (shadcn tabs style) & Menu */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+        {/* Status segment toggle (shadcn tabs style), Extra Actions & Menu */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0, flexWrap: 'wrap' }}>
+          {extraActions}
           <div className="tabs-list" style={{ height: '1.75rem', padding: '0.125rem' }}>
             <button
               type="button"
@@ -317,6 +369,48 @@ export const TaskCard: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Blocker reason banner */}
+      {task.status === 'blocked' && !isPromptingBlocker && (
+        <div
+          style={{
+            marginTop: '0.75rem',
+            padding: '0.625rem 0.875rem',
+            backgroundColor: 'rgba(239, 68, 68, 0.08)',
+            border: '1px solid rgba(239, 68, 68, 0.25)',
+            borderRadius: '0.5rem',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '0.5rem',
+            fontSize: '0.8125rem',
+          }}
+        >
+          <AlertCircle size={16} style={{ color: '#ef4444', marginTop: '0.125rem', flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+              <span style={{ fontWeight: 600, color: '#ef4444' }}>Blocker:</span>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => handleToggleExpand(true)}
+                style={{
+                  fontSize: '0.75rem',
+                  color: 'var(--muted-foreground)',
+                  padding: '0 0.25rem',
+                  height: 'auto',
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                }}
+              >
+                {isExpanded ? 'Hide comments' : 'View comments'}
+              </button>
+            </div>
+            <div style={{ color: 'var(--foreground)', wordBreak: 'break-word', marginTop: '0.125rem', lineHeight: 1.4 }}>
+              {blockerReasonText || 'This item is currently blocked.'}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Blocker reason prompt */}
       {isPromptingBlocker && (
         <form
@@ -362,55 +456,65 @@ export const TaskCard: React.FC<Props> = ({
       )}
 
       {/* Expanded Sections */}
-      {isExpanded && !isSubtaskView && (
-        <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-          {/* Subtasks */}
-          <div style={{ marginBottom: '1.25rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--foreground)' }}>
-                Subtasks ({completedSubtasks}/{totalSubtasks})
-              </span>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => onAddSubtask(task.id)}
-                style={{ color: 'var(--foreground)', fontWeight: 500 }}
-              >
-                <Plus size={13} />
-                <span>Add Subtask</span>
-              </button>
-            </div>
+      {isExpanded && (
+        <div style={{ marginTop: '0.875rem', paddingTop: '0.875rem', borderTop: '1px solid var(--border)' }}>
+          {/* Subtasks (only rendered for top-level tasks) */}
+          {!isSubtaskView && (
+            <div style={{ marginBottom: '1.25rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--foreground)' }}>
+                  Subtasks ({completedSubtasks}/{totalSubtasks})
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => onAddSubtask(task.id)}
+                  style={{ color: 'var(--foreground)', fontWeight: 500 }}
+                >
+                  <Plus size={13} />
+                  <span>Add Subtask</span>
+                </button>
+              </div>
 
-            {task.subtasks && task.subtasks.length > 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingLeft: '0.5rem' }}>
-                {task.subtasks.map((st) => (
-                  <TaskCard
-                    key={st.id}
-                    task={st}
-                    isSubtaskView={true}
-                    onUpdateStatus={onUpdateStatus}
-                    onUpdateTask={onUpdateTask}
-                    onDeleteTask={onDeleteTask}
-                    onAddComment={onAddComment}
-                    onUploadAttachment={onUploadAttachment}
-                    onDeleteAttachment={onDeleteAttachment}
-                    onEditTask={onEditTask}
-                    onAddSubtask={onAddSubtask}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No subtasks yet.
-              </div>
-            )}
-          </div>
+              {task.subtasks && task.subtasks.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingLeft: '0.5rem' }}>
+                  {task.subtasks.map((st) => (
+                    <TaskCard
+                      key={st.id}
+                      task={st}
+                      isSubtaskView={true}
+                      isExpanded={isTaskExpanded ? isTaskExpanded(st.id) : undefined}
+                      onToggleExpand={onToggleExpandTask ? (force) => onToggleExpandTask(st.id, force) : undefined}
+                      isTaskExpanded={isTaskExpanded}
+                      onToggleExpandTask={onToggleExpandTask}
+                      onUpdateStatus={onUpdateStatus}
+                      onUpdateTask={onUpdateTask}
+                      onDeleteTask={onDeleteTask}
+                      onAddComment={onAddComment}
+                      onUpdateComment={onUpdateComment}
+                      onDeleteComment={onDeleteComment}
+                      onUploadAttachment={onUploadAttachment}
+                      onDeleteAttachment={onDeleteAttachment}
+                      onEditTask={onEditTask}
+                      onAddSubtask={onAddSubtask}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                  No subtasks yet.
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Comments */}
           <CommentThread
             taskId={task.id}
             comments={task.comments || []}
             onAddComment={onAddComment}
+            onUpdateComment={onUpdateComment}
+            onDeleteComment={onDeleteComment}
           />
 
           {/* Attachments */}

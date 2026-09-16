@@ -206,3 +206,206 @@ func TestSubtaskNestingConstraint(t *testing.T) {
 		t.Errorf("expected error when creating second-level nested subtask, got nil")
 	}
 }
+
+func TestCommentCRUD(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	task, err := models.CreateTask(db, models.TaskInput{
+		Title: "Test Task for Comments",
+	})
+	if err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// 1. Create
+	c, err := models.CreateComment(db, task.ID, "Initial comment")
+	if err != nil {
+		t.Fatalf("failed to create comment: %v", err)
+	}
+	if c.Body != "Initial comment" {
+		t.Errorf("expected body 'Initial comment', got '%s'", c.Body)
+	}
+
+	// 2. Read
+	comments, err := models.GetCommentsByTaskID(db, task.ID)
+	if err != nil {
+		t.Fatalf("failed to get comments: %v", err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+
+	// 3. Update
+	updated, err := models.UpdateComment(db, c.ID, "Updated comment text")
+	if err != nil {
+		t.Fatalf("failed to update comment: %v", err)
+	}
+	if updated.Body != "Updated comment text" {
+		t.Errorf("expected body 'Updated comment text', got '%s'", updated.Body)
+	}
+
+	// 4. Delete
+	err = models.DeleteComment(db, c.ID)
+	if err != nil {
+		t.Fatalf("failed to delete comment: %v", err)
+	}
+
+	commentsAfter, err := models.GetCommentsByTaskID(db, task.ID)
+	if err != nil {
+		t.Fatalf("failed to get comments after delete: %v", err)
+	}
+	if len(commentsAfter) != 0 {
+		t.Errorf("expected 0 comments after delete, got %d", len(commentsAfter))
+	}
+}
+
+func TestSubtaskStatusUpdatePreservesParent(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Create parent task
+	parent, err := models.CreateTask(db, models.TaskInput{
+		Title: "Parent Task",
+	})
+	if err != nil {
+		t.Fatalf("failed to create parent: %v", err)
+	}
+
+	// 2. Create subtask under parent
+	subtask, err := models.CreateTask(db, models.TaskInput{
+		Title:        "Child Subtask",
+		ParentTaskID: &parent.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subtask: %v", err)
+	}
+	if subtask.ParentTaskID == nil || *subtask.ParentTaskID != parent.ID {
+		t.Fatalf("expected parent_task_id to be %d, got %v", parent.ID, subtask.ParentTaskID)
+	}
+
+	// 3. Update subtask status via JSON partial update
+	patchJSON := []byte(`{"status":"in_progress"}`)
+	updatedSubtask, err := models.UpdateTaskJSON(db, subtask.ID, patchJSON)
+	if err != nil {
+		t.Fatalf("failed to update subtask: %v", err)
+	}
+
+	// 4. Verify parent_task_id is STILL parent.ID and status is in_progress
+	if updatedSubtask.ParentTaskID == nil || *updatedSubtask.ParentTaskID != parent.ID {
+		t.Errorf("subtask parent_task_id was lost! expected %d, got %v", parent.ID, updatedSubtask.ParentTaskID)
+	}
+	if updatedSubtask.Status != models.StatusInProgress {
+		t.Errorf("expected status in_progress, got %s", updatedSubtask.Status)
+	}
+
+	// 5. Verify GetTodayTasks returns ONLY parent, and subtask is inside parent.Subtasks
+	todayTasks, err := models.GetTodayTasks(db, "")
+	if err != nil {
+		t.Fatalf("failed to get today tasks: %v", err)
+	}
+	if len(todayTasks) != 1 {
+		t.Fatalf("expected 1 top-level task in today tasks, got %d", len(todayTasks))
+	}
+	if todayTasks[0].ID != parent.ID {
+		t.Errorf("expected top-level task ID %d, got %d", parent.ID, todayTasks[0].ID)
+	}
+	if len(todayTasks[0].Subtasks) != 1 {
+		t.Fatalf("expected 1 subtask under parent, got %d", len(todayTasks[0].Subtasks))
+	}
+	if todayTasks[0].Subtasks[0].ID != subtask.ID {
+		t.Errorf("expected subtask ID %d, got %d", subtask.ID, todayTasks[0].Subtasks[0].ID)
+	}
+	if todayTasks[0].Subtasks[0].Status != models.StatusInProgress {
+		t.Errorf("expected subtask status in_progress, got %s", todayTasks[0].Subtasks[0].Status)
+	}
+}
+
+func TestSubtaskCommentsAndBlockedStatus(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Create parent task
+	parent, err := models.CreateTask(db, models.TaskInput{
+		Title:  "Parent Task with Comments",
+		Status: models.StatusNotStarted,
+	})
+	if err != nil {
+		t.Fatalf("failed to create parent task: %v", err)
+	}
+
+	// 2. Create subtask
+	subtask, err := models.CreateTask(db, models.TaskInput{
+		Title:        "Blocked Subtask",
+		ParentTaskID: &parent.ID,
+		Status:       models.StatusNotStarted,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subtask: %v", err)
+	}
+
+	// 3. Mark subtask as blocked and add blocker comment
+	_, err = models.UpdateTask(db, subtask.ID, models.TaskInput{
+		Status: models.StatusBlocked,
+	})
+	if err != nil {
+		t.Fatalf("failed to update subtask status to blocked: %v", err)
+	}
+
+	comment, err := models.CreateComment(db, subtask.ID, "Blocker: Waiting on security approval")
+	if err != nil {
+		t.Fatalf("failed to add comment to subtask: %v", err)
+	}
+	if comment.TaskID != subtask.ID {
+		t.Errorf("expected comment task_id %d, got %d", subtask.ID, comment.TaskID)
+	}
+
+	// 4. Verify GetSubtasks loads comments
+	subtasks, err := models.GetSubtasks(db, parent.ID)
+	if err != nil {
+		t.Fatalf("failed to get subtasks: %v", err)
+	}
+	if len(subtasks) != 1 {
+		t.Fatalf("expected 1 subtask, got %d", len(subtasks))
+	}
+	if len(subtasks[0].Comments) != 1 {
+		t.Fatalf("expected 1 comment on subtask, got %d", len(subtasks[0].Comments))
+	}
+	if subtasks[0].Comments[0].Body != "Blocker: Waiting on security approval" {
+		t.Errorf("expected blocker comment, got %s", subtasks[0].Comments[0].Body)
+	}
+
+	// 5. Verify GetTodayTasks returns parent with subtask and its comments populated
+	todayTasks, err := models.GetTodayTasks(db, "")
+	if err != nil {
+		t.Fatalf("failed to get today tasks: %v", err)
+	}
+	if len(todayTasks) != 1 {
+		t.Fatalf("expected 1 today task, got %d", len(todayTasks))
+	}
+	if len(todayTasks[0].Subtasks) != 1 {
+		t.Fatalf("expected 1 subtask under today task, got %d", len(todayTasks[0].Subtasks))
+	}
+	st := todayTasks[0].Subtasks[0]
+	if st.Status != models.StatusBlocked {
+		t.Errorf("expected subtask status blocked, got %s", st.Status)
+	}
+	if len(st.Comments) != 1 {
+		t.Fatalf("expected 1 comment inside today task subtask, got %d", len(st.Comments))
+	}
+	if st.Comments[0].Body != "Blocker: Waiting on security approval" {
+		t.Errorf("expected blocker comment body, got %s", st.Comments[0].Body)
+	}
+
+	// 6. Verify GetTasks also populates subtasks and comments
+	allTasks, err := models.GetTasks(db, models.TaskFilter{TopLevelOnly: true})
+	if err != nil {
+		t.Fatalf("failed to get all tasks: %v", err)
+	}
+	if len(allTasks) != 1 || len(allTasks[0].Subtasks) != 1 || len(allTasks[0].Subtasks[0].Comments) != 1 {
+		t.Fatalf("expected populated subtasks and comments in GetTasks")
+	}
+}
+
+
+

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import type { Card, Sprint, Task, TaskInput, TaskStatus } from '../types';
 import { getCards, getSprints } from '../api/client';
 import { X } from 'lucide-react';
@@ -23,6 +23,7 @@ export const TaskForm: React.FC<Props> = ({
   const [sprints, setSprints] = useState<Sprint[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const titleInputRef = useRef<HTMLInputElement>(null);
 
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -42,6 +43,11 @@ export const TaskForm: React.FC<Props> = ({
   useEffect(() => {
     if (isOpen) {
       getSprints().then(setSprints).catch(console.error);
+      const timer = setTimeout(() => {
+        titleInputRef.current?.focus();
+        titleInputRef.current?.select();
+      }, 50);
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 
@@ -140,8 +146,10 @@ export const TaskForm: React.FC<Props> = ({
               Title
             </label>
             <input
+              ref={titleInputRef}
               type="text"
               required
+              autoFocus
               className="input"
               placeholder="e.g. Implement user authentication flow"
               value={formData.title}

@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -305,6 +306,16 @@ func GetSubtasks(db *sql.DB, parentID int64) ([]Task, error) {
 		}
 		subtasks = append(subtasks, *subtask)
 	}
+	rows.Close()
+
+	for i := range subtasks {
+		if comments, err := GetCommentsByTaskID(db, subtasks[i].ID); err == nil {
+			subtasks[i].Comments = comments
+		}
+		if attachments, err := GetAttachmentsByTaskID(db, subtasks[i].ID); err == nil {
+			subtasks[i].Attachments = attachments
+		}
+	}
 
 	return subtasks, nil
 }
@@ -430,7 +441,7 @@ func GetTasks(db *sql.DB, filter TaskFilter) ([]Task, error) {
 
 	// Populate subtasks, comments, attachments after closing outer cursor
 	for i := range tasks {
-		if filter.TopLevelOnly {
+		if filter.TopLevelOnly || tasks[i].ParentTaskID == nil {
 			if subtasks, err := GetSubtasks(db, tasks[i].ID); err == nil {
 				tasks[i].Subtasks = subtasks
 			}
@@ -455,32 +466,49 @@ func UpdateTask(db *sql.DB, id int64, input TaskInput) (*Task, error) {
 		return nil, sql.ErrNoRows
 	}
 
-	if input.Title == "" {
-		input.Title = current.Title
+	if input.Title != "" {
+		current.Title = input.Title
 	}
-	if input.AssignedDate == "" {
-		input.AssignedDate = current.AssignedDate
+	if input.AssignedDate != "" {
+		current.AssignedDate = input.AssignedDate
 	}
-	if input.Status == "" {
-		input.Status = current.Status
+	if input.Description != nil {
+		current.Description = input.Description
+	}
+	if input.CardID != nil {
+		current.CardID = input.CardID
+	}
+	if input.SprintID != nil {
+		current.SprintID = input.SprintID
+	}
+	if input.ParentTaskID != nil {
+		current.ParentTaskID = input.ParentTaskID
+	}
+	if input.IsAdhoc {
+		current.IsAdhoc = true
+	}
+	if input.IsTechTask {
+		current.IsTechTask = true
+	}
+	if input.IsDeferred {
+		current.IsDeferred = true
 	}
 
-	// Status transitions:
-	// - If leaving 'not_started' and started_at is nil, set started_at
-	// - If moving to 'done', set completed_at
-	// - If leaving 'done', clear completed_at
 	startedAt := current.StartedAt
 	completedAt := current.CompletedAt
 
-	if current.Status == StatusNotStarted && input.Status != StatusNotStarted && startedAt == nil {
-		now := time.Now()
-		startedAt = &now
-	}
-	if input.Status == StatusDone && completedAt == nil {
-		now := time.Now()
-		completedAt = &now
-	} else if input.Status != StatusDone && completedAt != nil {
-		completedAt = nil
+	if input.Status != "" {
+		if current.Status == StatusNotStarted && input.Status != StatusNotStarted && startedAt == nil {
+			now := time.Now()
+			startedAt = &now
+		}
+		if input.Status == StatusDone && completedAt == nil {
+			now := time.Now()
+			completedAt = &now
+		} else if input.Status != StatusDone && completedAt != nil {
+			completedAt = nil
+		}
+		current.Status = input.Status
 	}
 
 	var startedAtStr, completedAtStr *string
@@ -506,21 +534,189 @@ func UpdateTask(db *sql.DB, id int64, input TaskInput) (*Task, error) {
 			is_deferred = ?,
 			assigned_date = ?,
 			started_at = ?,
-			completed_at = ?
+			completed_at = ?,
+			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 	res, err := db.Exec(
 		query,
-		input.CardID,
-		input.SprintID,
-		input.ParentTaskID,
-		input.Title,
-		input.Description,
-		string(input.Status),
-		boolToInt(input.IsAdhoc),
-		boolToInt(input.IsTechTask),
-		boolToInt(input.IsDeferred),
-		input.AssignedDate,
+		current.CardID,
+		current.SprintID,
+		current.ParentTaskID,
+		current.Title,
+		current.Description,
+		string(current.Status),
+		boolToInt(current.IsAdhoc),
+		boolToInt(current.IsTechTask),
+		boolToInt(current.IsDeferred),
+		current.AssignedDate,
+		startedAtStr,
+		completedAtStr,
+		id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update task: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, sql.ErrNoRows
+	}
+
+	return GetTaskByID(db, id)
+}
+
+func UpdateTaskJSON(db *sql.DB, id int64, body []byte) (*Task, error) {
+	current, err := GetTaskByID(db, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, sql.ErrNoRows
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("invalid json: %w", err)
+	}
+
+	if val, ok := raw["title"]; ok {
+		var s string
+		if err := json.Unmarshal(val, &s); err == nil && s != "" {
+			current.Title = s
+		}
+	}
+
+	if val, ok := raw["description"]; ok {
+		var s *string
+		if err := json.Unmarshal(val, &s); err == nil {
+			current.Description = s
+		}
+	}
+
+	if val, ok := raw["assigned_date"]; ok {
+		var s string
+		if err := json.Unmarshal(val, &s); err == nil && s != "" {
+			current.AssignedDate = s
+		}
+	}
+
+	if val, ok := raw["card_id"]; ok {
+		var cid *int64
+		if err := json.Unmarshal(val, &cid); err == nil {
+			current.CardID = cid
+		}
+	}
+
+	if val, ok := raw["sprint_id"]; ok {
+		var sid *int64
+		if err := json.Unmarshal(val, &sid); err == nil {
+			current.SprintID = sid
+		}
+	}
+
+	if val, ok := raw["parent_task_id"]; ok {
+		var pid *int64
+		if err := json.Unmarshal(val, &pid); err == nil {
+			if pid != nil {
+				parent, err := GetTaskByID(db, *pid)
+				if err != nil {
+					return nil, err
+				}
+				if parent == nil {
+					return nil, fmt.Errorf("parent task does not exist")
+				}
+				if parent.ParentTaskID != nil {
+					return nil, fmt.Errorf("cannot nest subtasks deeper than one level")
+				}
+			}
+			current.ParentTaskID = pid
+		}
+	}
+
+	if val, ok := raw["is_adhoc"]; ok {
+		var b bool
+		if err := json.Unmarshal(val, &b); err == nil {
+			current.IsAdhoc = b
+		}
+	}
+
+	if val, ok := raw["is_tech_task"]; ok {
+		var b bool
+		if err := json.Unmarshal(val, &b); err == nil {
+			current.IsTechTask = b
+		}
+	}
+
+	if val, ok := raw["is_deferred"]; ok {
+		var b bool
+		if err := json.Unmarshal(val, &b); err == nil {
+			current.IsDeferred = b
+		}
+	}
+
+	startedAt := current.StartedAt
+	completedAt := current.CompletedAt
+
+	if val, ok := raw["status"]; ok {
+		var newStatus TaskStatus
+		if err := json.Unmarshal(val, &newStatus); err == nil && newStatus != "" {
+			if current.Status == StatusNotStarted && newStatus != StatusNotStarted && startedAt == nil {
+				now := time.Now()
+				startedAt = &now
+			}
+			if newStatus == StatusDone && completedAt == nil {
+				now := time.Now()
+				completedAt = &now
+			} else if newStatus != StatusDone && completedAt != nil {
+				completedAt = nil
+			}
+			current.Status = newStatus
+		}
+	}
+
+	var startedAtStr, completedAtStr *string
+	if startedAt != nil {
+		s := startedAt.Format("2006-01-02 15:04:05")
+		startedAtStr = &s
+	}
+	if completedAt != nil {
+		s := completedAt.Format("2006-01-02 15:04:05")
+		completedAtStr = &s
+	}
+
+	query := `
+		UPDATE tasks SET
+			card_id = ?,
+			sprint_id = ?,
+			parent_task_id = ?,
+			title = ?,
+			description = ?,
+			status = ?,
+			is_adhoc = ?,
+			is_tech_task = ?,
+			is_deferred = ?,
+			assigned_date = ?,
+			started_at = ?,
+			completed_at = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`
+	res, err := db.Exec(
+		query,
+		current.CardID,
+		current.SprintID,
+		current.ParentTaskID,
+		current.Title,
+		current.Description,
+		string(current.Status),
+		boolToInt(current.IsAdhoc),
+		boolToInt(current.IsTechTask),
+		boolToInt(current.IsDeferred),
+		current.AssignedDate,
 		startedAtStr,
 		completedAtStr,
 		id,

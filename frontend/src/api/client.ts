@@ -167,6 +167,21 @@ export async function addComment(taskId: number, body: string): Promise<Comment>
   return handleResponse<Comment>(res);
 }
 
+export async function updateComment(commentId: number, body: string): Promise<Comment> {
+  const res = await fetch(`${BASE_URL}/comments/${commentId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  return handleResponse<Comment>(res);
+}
+
+export async function deleteComment(commentId: number): Promise<void> {
+  const res = await fetch(`${BASE_URL}/comments/${commentId}`, { method: 'DELETE' });
+  await handleResponse<{ message: string }>(res);
+}
+
+
 // Attachments
 export async function uploadAttachment(taskId: number, file: File): Promise<Attachment> {
   const formData = new FormData();

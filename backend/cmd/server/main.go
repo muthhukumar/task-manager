@@ -104,6 +104,11 @@ func main() {
 			r.Delete("/{id}", attachmentHandler.Delete)
 		})
 
+		r.Route("/comments", func(r chi.Router) {
+			r.Put("/{id}", commentHandler.Update)
+			r.Delete("/{id}", commentHandler.Delete)
+		})
+
 		r.Get("/media/{filename}", attachmentHandler.ServeMedia)
 
 		r.Route("/reports", func(r chi.Router) {
